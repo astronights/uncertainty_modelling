@@ -1,4 +1,4 @@
-""" CS5340 Lab 2 Part 1: Junction Tree Algorithm
+""" CS5340 Lab 2 Part 2: Parameter Learning
 See accompanying PDF for instructions.
 
 Name: Shubhankar Agrawal
@@ -9,240 +9,170 @@ Student ID: A0248330L
 import os
 import numpy as np
 import json
+
 import networkx as nx
 from argparse import ArgumentParser
 
-from factor import Factor
-from jt_construction import construct_junction_tree
-from factor_utils import factor_product, factor_evidence, factor_marginalize, assignment_to_index
-
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-INPUT_DIR = os.path.join(DATA_DIR, 'inputs')  # we will store the input data files here!
-PREDICTION_DIR = os.path.join(DATA_DIR, 'predictions')  # we will store the prediction files here!
+DATA_DIR = os.path.join(BASE_DIR, 'data')  # we will store the input data files here!
+OBSERVATION_DIR = os.path.join(DATA_DIR, 'observations')
+PREDICTION_DIR = os.path.join(DATA_DIR, 'predictions')
 
 
 """ ADD HELPER FUNCTIONS HERE """
-def compute_joint_distribution(factors):
-    """Computes the joint distribution defined by a list of given factors
-
-    Args:
-        factors (List[Factor]): List of factors
-
-    Returns:
-        Factor containing the joint distribution of the input factor list
-    """
-    joint = factors[0]
-    for factor in factors[1:]:
-        joint = factor_product(joint, factor)
-
-    return joint
 
 """ ADD HELPER FUNCTIONS HERE """
 
-def _update_mrf_w_evidence(all_nodes, evidence, edges, factors):
+
+def _learn_node_parameter_w(outputs, inputs=None):
     """
-    Update the MRF graph structure from observing the evidence
+    Returns the weight parameters of the linear Gaussian [w0, w1, ..., wI], where I is the number of inputs. Students
+    are encouraged to use numpy.linalg.solve() to get the weights. Learns weights for one node only.
+    Call once for each node.
 
     Args:
-        all_nodes: numpy array of nodes in the MRF
-        evidence: dictionary of node:observation pairs where evidence[x1] returns the observed value of x1
-        edges: numpy array of edges in the MRF
-        factors: list of Factors in teh MRF
+        outputs: numpy array of N output observations of the node
+        inputs: N x I numpy array of input observations to the linear Gaussian model
 
     Returns:
-        numpy array of query nodes
-        numpy array of updated edges (after observing evidence)
-        list of Factors (after observing evidence; empty factors should be removed)
+        numpy array of (I + 1) weights [w0, w1, ..., wI]
     """
-
-    query_nodes = all_nodes
-    updated_edges = edges
-    updated_factors = factors
+    num_inputs = 0 if inputs is None else inputs.shape[1]
+    weights = np.zeros(shape=num_inputs + 1)
 
     """ YOUR CODE HERE """
-    # Observe evidence
-    for i in range(len(factors)):
-        updated_factors[i] = factor_evidence(factors[i], evidence)
-    
-    # Update query nodes
-    query_nodes = np.setdiff1d(all_nodes, list(evidence.keys()))
+    # Add bias
+    biased_inputs = np.insert(inputs, 0, 1, axis=1)
 
-    # Update edges
-    updated_edges = [edge for edge in edges if (edge[0] not in evidence.keys() and edge[1] not in evidence.keys())]
+    # Calculate matrix products
+    xTx = np.dot(biased_inputs.T, biased_inputs)
+    yTx = np.dot(outputs, biased_inputs)
+
+    # Solve for weights
+    weights = np.linalg.solve(xTx, yTx.T).reshape((biased_inputs.shape[1],))
     """ END YOUR CODE HERE """
 
-    return query_nodes, updated_edges, updated_factors
+    return weights
 
 
-def _get_clique_potentials(jt_cliques, jt_edges, jt_clique_factors):
+def _learn_node_parameter_var(outputs, weights, inputs):
     """
-    Returns the list of clique potentials after performing the sum-product algorithm on the junction tree
+    Returns the variance i.e. sigma^2 for the node. Learns variance for one node only. Call once for each node.
 
     Args:
-        jt_cliques: list of junction tree nodes e.g. [[x1, x2], ...]
-        jt_edges: numpy array of junction tree edges e.g. [i,j] implies that jt_cliques[i] and jt_cliques[j] are
-                neighbors
-        jt_clique_factors: list of clique factors where jt_clique_factors[i] is the factor for cliques[i]
+        outputs: numpy array of N output observations of the node
+        weights: numpy array of (I + 1) weights of the linear Gaussian model
+        inputs:  N x I numpy array of input observations to the linear Gaussian model.
 
     Returns:
-        list of clique potentials computed from the sum-product algorithm
+        variance of the node's Linear Gaussian model
     """
-    clique_potentials = jt_clique_factors
+    var = 0.
+
+    """ YOUR CODE HERE """
+    # Add bias
+    biased_inputs = np.insert(inputs, 0, 1, axis=1)
+
+    # Calculate variance
+    var = np.sum((outputs - np.dot(weights, biased_inputs.T)) ** 2) / outputs.shape[1]
+    """ END YOUR CODE HERE """
+
+    return var
+
+
+def _get_learned_parameters(nodes, edges, observations):
+    """
+    Learns the parameters for each node in nodes and returns the parameters as a dictionary. The nodes are given in
+    ascending numerical order e.g. [1, 2, ..., V]
+
+    Args:
+        nodes: numpy array V nodes in the graph e.g. [1, 2, 3, ..., V]
+        edges: numpy array of edges in the graph e.g. [i, j] implies i -> j where i is the parent of j
+        observations: dictionary of node: observations pair where observations[1] returns a list of
+                    observations for node 1.
+
+    Returns:
+        dictionary of parameters e.g.
+        parameters = {
+            "1": {  // first node
+                "bias": w0 weight for node "1",
+                "variance": variance for node "1"
+
+                "2": weight for node "2", who is the parent of "1"
+                ...
+                // weights for other parents of "1"
+            },
+            ...
+            // parameters of other nodes.
+        }
+    """
+    parameters = {}
 
     """ YOUR CODE HERE """
     # Create graph
-    root = 0
-    graph = nx.Graph(jt_edges)
-    graph.add_nodes_from(range(len(jt_cliques)))
+    graph = nx.DiGraph()
+    graph.add_nodes_from(nodes)
+    graph.add_edges_from(edges)
+    for node in nodes:
+        # Collect inputs and outputs
+        outputs = np.array(observations[node])
+        outputs = outputs.reshape((1, outputs.size))
 
-    # Initialize messages
-    messages = [[None] * len(jt_cliques) for _ in range(len(jt_cliques))]
-    
-    # Function to pass messages given a traversal order
-    def pass_message(order_nodes):
-        for node in order_nodes:
-            for neighbor in graph.neighbors(node):
-                if order_nodes.index(node) < order_nodes.index(neighbor):
-                    children = [x for x in list(graph.neighbors(node)) if x != neighbor]
-                    factors_to_multiply = [messages[child][node] for child in children]
+        inputs = np.array([observations[parent] for parent in graph.predecessors(node)]).T  
+        if inputs.size == 0:
+            inputs = inputs.reshape((outputs.size, 0))
 
-                    # Collect factors to multiply
-                    factors_to_multiply.append(jt_clique_factors[node])
+        # Learn weights and variance and store in parameter dictionary
 
-                    # Multiply factors and marginalize
-                    potential = compute_joint_distribution(factors_to_multiply)
-                    margin_vars = np.setdiff1d(jt_cliques[node], jt_cliques[neighbor])
-                    messages[node][neighbor] = factor_marginalize(potential, margin_vars)
-    
-    # Calculate traversal from leaves to root
-    post_nodes = list(nx.dfs_postorder_nodes(graph, root))
-    pass_message(post_nodes)
+        weights = _learn_node_parameter_w(outputs, inputs)
+        parents = list(graph.predecessors(node))
 
-    # Calculate traversal from root to leaves
-    pre_nodes = list(nx.dfs_preorder_nodes(graph, root))
-    pass_message(pre_nodes)
+        parameters[node] = {}
+        for i in range(len(parents)):
+            parameters[node][parents[i]] = weights[i+1]
+        parameters[node]['bias'] = weights[0]
+        parameters[node]['variance'] = _learn_node_parameter_var(outputs, weights, inputs)
 
-    # Calculate clique potentials
-    for node in range(len(jt_cliques)):
-        children = [x for x in list(graph.neighbors(node))]
-        factors_to_multiply = [messages[child][node] for child in children] + [jt_clique_factors[node]]
-        clique_potentials[node] = compute_joint_distribution(factors_to_multiply)
     """ END YOUR CODE HERE """
 
-    assert len(clique_potentials) == len(jt_cliques)
-    return clique_potentials
-
-
-def _get_node_marginal_probabilities(query_nodes, cliques, clique_potentials):
-    """
-    Returns the marginal probability for each query node from the clique potentials.
-
-    Args:
-        query_nodes: numpy array of query nodes e.g. [x1, x2, ..., xN]
-        cliques: list of cliques e.g. [[x1, x2], ... [x2, x3, .., xN]]
-        clique_potentials: list of clique potentials (Factor class)
-
-    Returns:
-        list of node marginal probabilities (Factor class)
-
-    """
-    query_marginal_probabilities = []
-
-    """ YOUR CODE HERE """
-    for node in query_nodes:
-        # Find smallest clique that contains node
-        p_cliques = [c for c in cliques if node in c]
-        min_clique = min(p_cliques, key=len)
-        potential = clique_potentials[cliques.index(min_clique)]
-
-        # Marginalize over all other variables and normalize
-        marginal = factor_marginalize(potential, np.setdiff1d(potential.var, [node]))
-        marginal.val = marginal.val / np.sum(marginal.val)
-        query_marginal_probabilities.append(marginal)
-    """ END YOUR CODE HERE """
-
-    return query_marginal_probabilities
-
-
-def get_conditional_probabilities(all_nodes, evidence, edges, factors):
-    """
-    Returns query nodes and query Factors representing the conditional probability of each query node
-    given the evidence e.g. p(xf|Xe) where xf is a single query node and Xe is the set of evidence nodes.
-
-    Args:
-        all_nodes: numpy array of all nodes (random variables) in the graph
-        evidence: dictionary of node:evidence pairs e.g. evidence[x1] returns the observed value for x1
-        edges: numpy array of all edges in the graph e.g. [[x1, x2],...] implies that x1 is a neighbor of x2
-        factors: list of factors in the MRF.
-
-    Returns:
-        numpy array of query nodes
-        list of Factor
-    """
-    query_nodes, updated_edges, updated_node_factors = _update_mrf_w_evidence(all_nodes=all_nodes, evidence=evidence,
-                                                                              edges=edges, factors=factors)
-
-    jt_cliques, jt_edges, jt_factors = construct_junction_tree(nodes=query_nodes, edges=updated_edges,
-                                                               factors=updated_node_factors)
-
-    clique_potentials = _get_clique_potentials(jt_cliques=jt_cliques, jt_edges=jt_edges, jt_clique_factors=jt_factors)
-
-    query_node_marginals = _get_node_marginal_probabilities(query_nodes=query_nodes, cliques=jt_cliques,
-                                                            clique_potentials=clique_potentials)
-
-    return query_nodes, query_node_marginals
-
-
-def parse_input_file(input_file: str):
-    """ Reads the input file and parses it. DO NOT EDIT THIS FUNCTION. """
-    with open(input_file, 'r') as f:
-        input_config = json.load(f)
-
-    nodes = np.array(input_config['nodes'])
-    edges = np.array(input_config['edges'])
-
-    # parse evidence
-    raw_evidence = input_config['evidence']
-    evidence = {}
-    for k, v in raw_evidence.items():
-        evidence[int(k)] = v
-
-    # parse factors
-    raw_factors = input_config['factors']
-    factors = []
-    for raw_factor in raw_factors:
-        factor = Factor(var=np.array(raw_factor['var']), card=np.array(raw_factor['card']),
-                        val=np.array(raw_factor['val']))
-        factors.append(factor)
-    return nodes, edges, evidence, factors
+    return parameters
 
 
 def main():
-    """ Entry function to handle loading inputs and saving outputs. DO NOT EDIT THIS FUNCTION. """
+    """
+    Helper function to load the observations, call your parameter learning function and save your results.
+    DO NOT EDIT THIS FUNCTION.
+    """
     argparser = ArgumentParser()
     argparser.add_argument('--case', type=int, required=True,
                            help='case number to create observations e.g. 1 if 1.json')
     args = argparser.parse_args()
 
     case = args.case
-    input_file = os.path.join(INPUT_DIR, '{}.json'.format(case))
-    nodes, edges, evidence, factors = parse_input_file(input_file=input_file)
+    observation_file = os.path.join(OBSERVATION_DIR, '{}.json'.format(case))
+    with open(observation_file, 'r') as f:
+         observation_config = json.load(f)
 
-    # solution part:
-    query_nodes, query_conditional_probabilities = get_conditional_probabilities(all_nodes=nodes, edges=edges,
-                                                                                 factors=factors, evidence=evidence)
+    nodes = observation_config['nodes']
+    edges = observation_config['edges']
+    observations = observation_config['observations']
 
-    predictions = {}
-    for i, node in enumerate(query_nodes):
-        probability = query_conditional_probabilities[i].val
-        predictions[int(node)] = list(np.array(probability, dtype=float))
+    # solution part
+    parameters = _get_learned_parameters(nodes=nodes, edges=edges, observations=observations)
+    # end solution part
+
+    # json only recognises floats, not np.float, so we need to cast the values into floats.
+    for node, node_params in parameters.items():
+        for param, val in node_params.items():
+            node_params[param] = float(val)
+        parameters[node] = node_params
 
     if not os.path.exists(PREDICTION_DIR):
         os.makedirs(PREDICTION_DIR)
     prediction_file = os.path.join(PREDICTION_DIR, '{}.json'.format(case))
+
     with open(prediction_file, 'w') as f:
-        json.dump(predictions, f, indent=1)
+        json.dump(parameters, f, indent=1)
     print('INFO: Results for test case {} are stored in {}'.format(case, prediction_file))
 
 
